@@ -24,7 +24,8 @@ async def home(request: Request):
 async def analyze(request: Request, jogo: str = Form(...)):
     """
     Recebe um jogo no formato "Equipa Casa vs Equipa Fora",
-    vai buscar estatísticas reais à API, e sugere uma aposta simples.
+    busca estatísticas reais à API, e sugere uma aposta simples.
+    Funciona para qualquer país.
     """
     # Validar formato do input
     try:
@@ -35,53 +36,27 @@ async def analyze(request: Request, jogo: str = Form(...)):
             "resultado": "❌ Formato inválido. Usa: Equipa Casa vs Equipa Fora"
         })
 
-    # 🔍 Função auxiliar para escolher equipa correta
-    def escolher_equipe(data, nome):
-        if "response" not in data or len(data["response"]) == 0:
-            return None
-        for t in data["response"]:
-            if nome.lower() in t["team"]["name"].lower():
-                return t
-        return data["response"][0]  # fallback: primeira equipa
-
+    # 🔍 Obter IDs das equipas (qualquer país)
     try:
-        # Buscar equipas
-        home_resp = requests.get(f"https://v3.football.api-sports.io/teams?name={home_team}", headers=HEADERS)
-        away_resp = requests.get(f"https://v3.football.api-sports.io/teams?name={away_team}", headers=HEADERS)
-        home_data = home_resp.json()
-        away_data = away_resp.json()
+        def get_team_id(team_name):
+            resp = requests.get(f"https://v3.football.api-sports.io/teams?name={team_name}", headers=HEADERS)
+            data = resp.json()
+            if "response" not in data or not data["response"]:
+                return None
+            # Escolhe a primeira equipa retornada (pode ser aprimorado para filtrar por país/league)
+            return data["response"][0]["team"]["id"], data["response"][0]["team"]["name"]
 
-        # Escolher equipas corretas
-        home_team_data = escolher_equipe(home_data, home_team)
-        away_team_data = escolher_equipe(away_data, away_team)
+        home_info = get_team_id(home_team)
+        away_info = get_team_id(away_team)
 
-        if home_team_data is None or away_team_data is None:
+        if not home_info or not away_info:
             return templates.TemplateResponse("index.html", {
                 "request": request,
                 "resultado": "❌ Equipa(s) não encontrada(s). Verifica os nomes."
             })
 
-        home_id = home_team_data["team"]["id"]
-        away_id = away_team_data["team"]["id"]
-        home_name = home_team_data["team"]["name"]
-        away_name = away_team_data["team"]["name"]
-
-        # ⚽ Obter estatísticas (últimos 5 jogos na liga principal)
-        # Nota: podes mudar o league_id para a liga que quiseres
-        league_id = 39  # exemplo: Premier League
-        season = 2024
-
-        home_stats_resp = requests.get(
-            f"https://v3.football.api-sports.io/teams/statistics?team={home_id}&season={season}&league={league_id}",
-            headers=HEADERS
-        )
-        away_stats_resp = requests.get(
-            f"https://v3.football.api-sports.io/teams/statistics?team={away_id}&season={season}&league={league_id}",
-            headers=HEADERS
-        )
-
-        home_stats = home_stats_resp.json()
-        away_stats = away_stats_resp.json()
+        home_id, home_name = home_info
+        away_id, away_name = away_info
 
     except Exception as e:
         return templates.TemplateResponse("index.html", {
@@ -89,23 +64,32 @@ async def analyze(request: Request, jogo: str = Form(...)):
             "resultado": f"❌ Erro ao obter dados da API: {str(e)}"
         })
 
-    # 📊 Extrair estatísticas simples
+    # 📊 Obter estatísticas simples (últimos 5 jogos de cada equipa)
     try:
-        home_wins = home_stats["response"]["fixtures"]["wins"]["total"]
-        away_wins = away_stats["response"]["fixtures"]["wins"]["total"]
+        def get_stats(team_id):
+            resp = requests.get(
+                f"https://v3.football.api-sports.io/teams/statistics?team={team_id}",
+                headers=HEADERS
+            )
+            data = resp.json()
+            if "response" not in data:
+                return None
+            stats = data["response"]["fixtures"]
+            wins = stats.get("wins", {}).get("total", 0)
+            draws = stats.get("draws", {}).get("total", 0)
+            loses = stats.get("loses", {}).get("total", 0)
+            return wins, draws, loses
 
-        home_draws = home_stats["response"]["fixtures"]["draws"]["total"]
-        away_draws = away_stats["response"]["fixtures"]["draws"]["total"]
+        home_wins, home_draws, home_losses = get_stats(home_id)
+        away_wins, away_draws, away_losses = get_stats(away_id)
 
-        home_losses = home_stats["response"]["fixtures"]["loses"]["total"]
-        away_losses = away_stats["response"]["fixtures"]["loses"]["total"]
-    except KeyError:
+    except Exception:
         return templates.TemplateResponse("index.html", {
             "request": request,
-            "resultado": "⚠️ Estatísticas não encontradas para estas equipas/temporada."
+            "resultado": "⚠️ Estatísticas não disponíveis para estas equipas."
         })
 
-    # 🧠 Sugestão de aposta simples
+    # 🧠 Lógica simples de sugestão de aposta
     if home_wins > away_wins + 3:
         sugestao = f"🏠 Apostar na vitória do {home_name} parece seguro."
     elif away_wins > home_wins + 3:
